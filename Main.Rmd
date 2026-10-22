@@ -1,0 +1,208 @@
+---
+title: "Main"
+output: html_document
+date: "2026-10-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Package Load}
+# Install first time with commented line below or for updates
+remotes::install_github("HenryTraynor/RoostEpiPkg")
+library(RoostEpiPkg)
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(progress)
+
+set.seed(123)
+```
+
+```{r Helper Function}
+# Approximate Clark-Evans R for points in a unit-square landscape
+calculate_clark_evans_R <- function(x, y) {
+  coords <- cbind(x, y)
+  n <- nrow(coords)
+
+  distances <- as.matrix(dist(coords))
+  diag(distances) <- Inf
+
+  mean_nn <- mean(apply(distances, 1, min))
+  expected_nn <- 0.5 / sqrt(n)
+
+  mean_nn / expected_nn
+}
+
+
+
+```
+
+```{r Model Parameters}
+epi_params <- create_epidemic_params(
+  beta = 0.5,
+  gamma = 0.03,
+  model = "SIR"
+)
+
+spatial_params <- create_spatial_params(
+  nx = 50,
+  ny = 50
+)
+
+prop_modern_values <- seq(0, 1, by = 0.2)
+
+num_clusters_values <- c(2, 5, 8, 12, 20)
+
+n_replicates <- 1
+n_days <- 100
+
+```
+
+```{r Simulation}
+# Total number of simulations
+total_simulations <- length(prop_modern_values) *
+                     length(num_clusters_values) *
+                     n_replicates
+
+results <- list()
+counter <- 1
+
+pb <- progress_bar$new(
+  format = "  Simulating [:bar] :percent | Elapsed: :elapsed | ETA: :eta",
+  total = total_simulations,
+  clear = FALSE,
+  width = 60
+)
+
+for (p in prop_modern_values) {
+  for (nc in num_clusters_values) {
+    for (rep in seq_len(n_replicates)) {
+
+      # Generate roosts
+      roost_info <- create_roosts(
+        num_roosts = 25,
+        num_clusters = nc,
+        prop_modern = p
+      )
+
+      # Measure realized spatial structure
+      realized_R <- calculate_clark_evans_R(
+        roost_info$x,
+        roost_info$y
+      )
+
+      # Initialize populations
+      roost_info <- initialize_roost_populations(
+        roost_info,
+        initial_occupancy = 0.25,
+        initial_infected = 0.25
+      )
+
+      # Configure movement
+      movement_params <- setup_movement(
+        roost_info = roost_info,
+        spatial_params = spatial_params
+      )
+
+      # Run SIR simulation
+      sim <- run_simulation(
+        roost_info = roost_info,
+        spatial_params = spatial_params,
+        movement_params = movement_params,
+        epidemic_params = epi_params,
+        n_days = n_days
+      )
+
+      # Peak prevalence across days
+      daily_prevalence <- vapply(
+        sim,
+        function(day) {
+          roosts <- day$roosts
+          total_N <- sum(roosts$N)
+
+          if (total_N <= 0) {
+            return(NA_real_)
+          }
+
+          sum(roosts$I) / total_N
+        },
+        numeric(1)
+      )
+
+      peak_prevalence <- if (
+        all(is.na(daily_prevalence))
+      ) {
+        NA_real_
+      } else {
+        max(daily_prevalence, na.rm = TRUE)
+      }
+
+      results[[counter]] <- data.frame(
+        prop_modern = p,
+        num_clusters = nc,
+        Clark_Evans_R = realized_R,
+        replicate = rep,
+        peak_prevalence = peak_prevalence
+      )
+
+      counter <- counter + 1
+      
+      # Update progress bar
+      pb$message(sprintf("prop_modern = %.2f, clusters = %d", p, nc))
+      pb$tick()
+      
+    }
+  }
+}
+
+results_df <- bind_rows(results)
+```
+
+```{r Plotting}
+heatmap_data <- results_df %>%
+  filter(!is.na(peak_prevalence)) %>%
+  mutate(
+    R_bin = cut(
+      Clark_Evans_R,
+      breaks = seq(
+        floor(min(Clark_Evans_R, na.rm = TRUE) * 10) / 10,
+        ceiling(max(Clark_Evans_R, na.rm = TRUE) * 10) / 10 + 0.1,
+        by = 0.1
+      ),
+      include.lowest = TRUE
+    )
+  ) %>%
+  group_by(prop_modern, R_bin) %>%
+  summarise(
+    mean_R = mean(Clark_Evans_R),
+    mean_peak_prevalence = mean(peak_prevalence),
+    n = n(),
+    .groups = "drop"
+  )
+
+ggplot(
+  heatmap_data,
+  aes(
+    x = prop_modern,
+    y = mean_R,
+    fill = mean_peak_prevalence
+  )
+) +
+  geom_tile() +
+  scale_fill_viridis_c(
+    name = "Mean peak\nprevalence",
+    limits = c(0, 1)
+  ) +
+  scale_x_continuous(
+    name = "Proportion of modern roosts",
+    breaks = prop_modern_values
+  ) +
+  labs(
+    y = "Clark-Evans R",
+    title = "SIR epidemic intensity across urbanization and spatial structure"
+  ) +
+  theme_minimal(base_size = 12)
+```
