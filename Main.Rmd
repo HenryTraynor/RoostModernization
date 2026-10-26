@@ -41,21 +41,44 @@ calculate_clark_evans_R <- function(x, y) {
 ```
 
 ```{r Model Parameters}
+# Epidemic parameters
 epi_params <- create_epidemic_params(
   beta = 0.5,
   gamma = 0.03,
   model = "SIR"
 )
 
+# create spatial parameters and grid
 spatial_params <- create_spatial_params(
   nx = 50,
   ny = 50
 )
 
+# Number of roosts
+num_roosts <- 100
+
+# Spatial clustering parameters
+cluster_range <- c(1,round(num_roosts/4))
+cluster_res <- 2
+cluster_seq <- seq(
+  cluster_range[1],
+  cluster_range[2],
+  by=cluster_res
+)
+sd_range <- c(0.03, 0.2)
+sd_seq <- seq(sd_range[1], sd_range[2], length=length(cluster_seq))
+
+# df of paired spatial params
+spatial_distribution <- data.frame(
+  num_clusters = cluster_seq,
+  sd = sd_seq
+)
+
+# modern building proportion sequence
 prop_modern_values <- seq(0, 1, by = 0.2)
 
-num_clusters_values <- c(2, 5, 8, 12, 20)
 
+# sim length params
 n_replicates <- 1
 n_days <- 100
 
@@ -64,7 +87,7 @@ n_days <- 100
 ```{r Simulation}
 # Total number of simulations
 total_simulations <- length(prop_modern_values) *
-                     length(num_clusters_values) *
+                     nrow(spatial_distribution) *
                      n_replicates
 
 results <- list()
@@ -83,7 +106,7 @@ for (p in prop_modern_values) {
 
       # Generate roosts
       roost_info <- create_roosts(
-        num_roosts = 25,
+        num_roosts = num_roosts,
         num_clusters = nc,
         prop_modern = p
       )
