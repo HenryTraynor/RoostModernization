@@ -10,6 +10,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ```{r Package Load}
 # Install first time with commented line below or for updates
+#detach("package:RoostEpiPkg", unload = TRUE)
 remotes::install_github("HenryTraynor/RoostEpiPkg")
 library(RoostEpiPkg)
 
@@ -19,25 +20,6 @@ library(ggplot2)
 library(progress)
 
 set.seed(123)
-```
-
-```{r Helper Function}
-# Approximate Clark-Evans R for points in a unit-square landscape
-calculate_clark_evans_R <- function(x, y) {
-  coords <- cbind(x, y)
-  n <- nrow(coords)
-
-  distances <- as.matrix(dist(coords))
-  diag(distances) <- Inf
-
-  mean_nn <- mean(apply(distances, 1, min))
-  expected_nn <- 0.5 / sqrt(n)
-
-  mean_nn / expected_nn
-}
-
-
-
 ```
 
 ```{r Model Parameters}
@@ -68,164 +50,167 @@ cluster_seq <- seq(
 sd_range <- c(0.03, 0.2)
 sd_seq <- seq(sd_range[1], sd_range[2], length=length(cluster_seq))
 
-# df of paired spatial params
-spatial_distribution <- data.frame(
-  num_clusters = cluster_seq,
-  sd = sd_seq
-)
 
 # modern building proportion sequence
 prop_modern_values <- seq(0, 1, by = 0.2)
+```
 
+```{r Simulation Params}
+# Min and max Clark Evan's R for our set of landscapes
+R_breaks <- seq(0.2, 1.2, length.out = 10)
 
-# sim length params
 n_replicates <- 1
 n_days <- 100
+```
 
+```{r Landscape set}
+landscape_design <- generate_landscapes(
+  n_per_bin = 10,
+  R_breaks = R_breaks,
+  prop_modern_values = prop_modern_values,
+  num_roosts = 100,
+  cluster_values = cluster_seq,
+  sd_values = sd_seq,
+  modern_N_max = 100,
+  traditional_N_max = 20,
+  min_N_max = 5,
+  max_attempts = 10000
+)
+
+# Number of unique base landscapes
+length(landscape_design$landscapes)
+
+# Number of landscape-modernization combinations
+nrow(landscape_design$design)
+
+# Check that each R bin has 10 landscapes
+table(vapply(
+  landscape_design$landscapes,
+  function(x) x$R_bin,
+  integer(1)
+))
+
+# Check modernization balance
+table(landscape_design$design$prop_modern)
+```
+
+```{r Test Sim}
+# Select the first design combination
+test_row <- landscape_design$design[1, ]
+test_roosts <- test_row$roost_info[[1]]
+
+# Initialize populations
+test_roosts <- initialize_roost_populations(
+  test_roosts
+)
+
+movement_params <- setup_movement(
+  test_roosts,
+  spatial_params
+)
+
+# Run the test
+test_sim <- run_simulation(
+  roost_info = test_roosts,
+  spatial_params = spatial_params,
+  movement_params = movement_params,
+  epidemic_params = epi_params,
+  n_days = 60
+)
+
+# Inspect the output
 ```
 
 ```{r Simulation}
-# Total number of simulations
-total_simulations <- length(prop_modern_values) *
-                     nrow(spatial_distribution) *
-                     n_replicates
-
-results <- list()
-counter <- 1
+total_runs <- nrow(landscape_design$design) * n_replicates
 
 pb <- progress_bar$new(
-  format = "  Simulating [:bar] :percent | Elapsed: :elapsed | ETA: :eta",
-  total = total_simulations,
+  total = total_runs,
+  format = "  Running [:bar] :percent | :current/:total | elapsed: :elapsed",
   clear = FALSE,
   width = 60
 )
 
-for (p in prop_modern_values) {
-  for (nc in num_clusters_values) {
-    for (rep in seq_len(n_replicates)) {
+results <- vector("list", total_runs)
+run_id <- 0L
 
-      # Generate roosts
-      roost_info <- create_roosts(
-        num_roosts = num_roosts,
-        num_clusters = nc,
-        prop_modern = p
-      )
+for (i in seq_len(nrow(landscape_design$design))) {
+  design_row <- landscape_design$design[i, ]
 
-      # Measure realized spatial structure
-      realized_R <- calculate_clark_evans_R(
-        roost_info$x,
-        roost_info$y
-      )
+  for (rep in seq_len(n_replicates)) {
+    run_id <- run_id + 1L
+    pb$tick()
 
-      # Initialize populations
-      roost_info <- initialize_roost_populations(
-        roost_info,
-        initial_occupancy = 0.25,
-        initial_infected = 0.25
-      )
+    # Get this landscape-modernization combination
+    roost_info <- design_row$roost_info[[1]]
 
-      # Configure movement
-      movement_params <- setup_movement(
-        roost_info = roost_info,
-        spatial_params = spatial_params
-      )
+    # Initialize a fresh population for this replicate
+    roost_info <- initialize_roost_populations(
+      roost_info
+    )
 
-      # Run SIR simulation
-      sim <- run_simulation(
-        roost_info = roost_info,
-        spatial_params = spatial_params,
-        movement_params = movement_params,
-        epidemic_params = epi_params,
-        n_days = n_days
-      )
+    # Rebuild movement parameters for this landscape
+    movement_params <- setup_movement(
+      roost_info,
+      spatial_params
+    )
 
-      # Peak prevalence across days
-      daily_prevalence <- vapply(
-        sim,
-        function(day) {
-          roosts <- day$roosts
-          total_N <- sum(roosts$N)
+    # Run the epidemic
+    sim <- run_simulation(
+      roost_info = roost_info,
+      spatial_params = spatial_params,
+      movement_params = movement_params,
+      epidemic_params = epi_params,
+      n_days = n_days
+    )
 
-          if (total_N <= 0) {
-            return(NA_real_)
-          }
-
-          sum(roosts$I) / total_N
-        },
-        numeric(1)
-      )
-
-      peak_prevalence <- if (
-        all(is.na(daily_prevalence))
-      ) {
-        NA_real_
-      } else {
-        max(daily_prevalence, na.rm = TRUE)
-      }
-
-      results[[counter]] <- data.frame(
-        prop_modern = p,
-        num_clusters = nc,
-        Clark_Evans_R = realized_R,
-        replicate = rep,
-        peak_prevalence = peak_prevalence
-      )
-
-      counter <- counter + 1
-      
-      # Update progress bar
-      pb$message(sprintf("prop_modern = %.2f, clusters = %d", p, nc))
-      pb$tick()
-      
-    }
+    # Store the full simulation and its design metadata
+    results[[run_id]] <- list(
+      landscape_id = design_row$landscape_id,
+      prop_modern = design_row$prop_modern,
+      Clark_Evans_R = design_row$Clark_Evans_R,
+      R_bin = design_row$R_bin,
+      num_clusters = design_row$num_clusters,
+      sd = design_row$sd,
+      replicate = rep,
+      simulation = sim
+    )
   }
 }
 
-results_df <- bind_rows(results)
+saveRDS(results, "roost_epidemic_simulations.rds")
 ```
 
-```{r Plotting}
-heatmap_data <- results_df %>%
-  filter(!is.na(peak_prevalence)) %>%
-  mutate(
-    R_bin = cut(
-      Clark_Evans_R,
-      breaks = seq(
-        floor(min(Clark_Evans_R, na.rm = TRUE) * 10) / 10,
-        ceiling(max(Clark_Evans_R, na.rm = TRUE) * 10) / 10 + 0.1,
-        by = 0.1
-      ),
-      include.lowest = TRUE
-    )
-  ) %>%
-  group_by(prop_modern, R_bin) %>%
-  summarise(
-    mean_R = mean(Clark_Evans_R),
-    mean_peak_prevalence = mean(peak_prevalence),
-    n = n(),
-    .groups = "drop"
-  )
+```{r}
+for (i in seq_len(min(3, nrow(landscape_design$design)))) {
 
-ggplot(
-  heatmap_data,
-  aes(
-    x = prop_modern,
-    y = mean_R,
-    fill = mean_peak_prevalence
-  )
-) +
-  geom_tile() +
-  scale_fill_viridis_c(
-    name = "Mean peak\nprevalence",
-    limits = c(0, 1)
-  ) +
-  scale_x_continuous(
-    name = "Proportion of modern roosts",
-    breaks = prop_modern_values
-  ) +
-  labs(
-    y = "Clark-Evans R",
-    title = "SIR epidemic intensity across urbanization and spatial structure"
-  ) +
-  theme_minimal(base_size = 12)
+  design_row <- landscape_design$design[i, ]
+
+  for (rep in seq_len(1)) {
+
+    message("Starting run: landscape row ", i, ", replicate ", rep)
+
+    roost_info <- design_row$roost_info[[1]]
+
+    message("Initializing population...")
+    roost_info <- initialize_roost_populations(roost_info)
+
+    message("Setting up movement...")
+    movement_params <- setup_movement(
+      roost_info,
+      spatial_params
+    )
+
+    message("Running epidemic...")
+    sim <- run_simulation(
+      roost_info = roost_info,
+      spatial_params = spatial_params,
+      movement_params = movement_params,
+      epidemic_params = epi_params,
+      n_days = n_days
+    )
+
+    message("Simulation completed.")
+  }
+}
 ```
