@@ -1,0 +1,336 @@
+---
+title: "Simulating on Landscape Set"
+author: "Henry Traynor"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Generate Landscapes}
+num_roosts <- 100
+
+# Spatial clustering parameters
+cluster_range <- c(1,round(num_roosts/4))
+cluster_res <- 3
+cluster_seq <- seq(
+  cluster_range[1],
+  cluster_range[2],
+  by=cluster_res
+)
+sd_range <- c(0.03, 0.2)
+sd_seq <- seq(sd_range[1], sd_range[2], length=length(cluster_seq))
+
+landscape_set <- generate_landscapes(
+  n_per_bin = 5,
+  R_breaks = c(0, 0.4, 0.8, 1.2),
+  prop_modern_values = seq(0, 1, by = 0.25),
+  num_roosts = num_roosts,
+  cluster_values = cluster_seq,
+  sd_values = sd_seq
+)
+
+# Number of landscape scenarios
+design <- landscape_set$design
+n_sims <- nrow(design)
+n_sims
+```
+
+```{r Simulations}
+# Storage for simulation results
+simulation_results <- vector("list", n_sims)
+
+# Reproducibility
+set.seed(123)
+
+# Create progress bar
+pb <- progress_bar$new(
+  format = " Simulating landscapes [:bar] :percent | ETA: :eta",
+  total = n_sims,
+  clear = FALSE,
+  width = 60
+)
+
+for (i in seq_len(n_sims)) {
+  
+  # Extract landscape
+  roost_info <- design$roost_info[[i]]
+  
+  # Initialize bat populations
+  roost_info <- initialize_roost_populations(
+    roost_info,
+    initial_occupancy = 0.25
+  )
+  
+  # Run epidemic simulation
+  simulation_results[[i]] <- run_simulation(
+    roost_info = roost_info,
+    n_days = 150,
+    beta = 0.5,
+    gamma = 0.2,
+    model = "SIR",
+    infection_day = 30,
+    initial_infected = 5,
+    movement_params = list(
+      lambda = 5,
+      alpha = 1,
+      stay_prob = 0.75,
+      epsilon = 0.01
+    )
+  )
+  
+  # Attach landscape information
+  simulation_results[[i]]$landscape_info <- list(
+    simulation_id = i,
+    landscape_id = design$landscape_id[i],
+    prop_modern = design$prop_modern[i],
+    Clark_Evans_R = design$Clark_Evans_R[i],
+    num_clusters = design$num_clusters[i],
+    sd = design$sd[i],
+    R_bin = design$R_bin[i]
+  )
+  
+  pb$tick()
+}
+
+names(simulation_results) <- paste0(
+  "simulation_",
+  seq_len(n_sims)
+)
+```
+
+```{r Extract Metrics}
+extract_epidemic_metrics <- function(simulation) {
+
+  history <- simulation$roost_history
+
+  daily <- do.call(
+    rbind,
+    lapply(seq_along(history), function(i) {
+
+      roosts <- history[[i]]
+
+      data.frame(
+        day = i - 1,
+        S = sum(roosts$S),
+        I = sum(roosts$I),
+        R = sum(roosts$R),
+        N = sum(roosts$N)
+      )
+    })
+  )
+
+  peak_day <- which.max(daily$I)
+
+  # Days with at least one infected bat
+  infected_days <- daily$day[daily$I > 0]
+
+  data.frame(
+    peak_infected = max(daily$I),
+    peak_prevalence = max(daily$I / daily$N),
+    time_to_peak = daily$day[peak_day],
+    infected_bat_days = sum(daily$I),
+    epidemic_duration = if (length(infected_days) > 0) {
+      max(infected_days) - min(infected_days) + 1
+    } else {
+      0
+    }
+  )
+}
+
+epidemic_summary <- do.call(
+  rbind,
+  lapply(seq_along(simulation_results), function(i) {
+
+    metrics <- extract_epidemic_metrics(
+      simulation_results[[i]]
+    )
+
+    landscape <- simulation_results[[i]]$landscape_info
+
+    data.frame(
+      simulation_id = landscape$simulation_id,
+      landscape_id = landscape$landscape_id,
+      prop_modern = landscape$prop_modern,
+      Clark_Evans_R = landscape$Clark_Evans_R,
+      num_clusters = landscape$num_clusters,
+      sd = landscape$sd,
+      metrics
+    )
+  })
+)
+
+head(epidemic_summary)
+
+library(lme4)
+
+model_mixed <- lmer(
+  peak_prevalence ~ prop_modern * Clark_Evans_R +
+    (1 | landscape_id),
+  data = epidemic_summary
+)
+
+summary(model_mixed)
+
+```
+
+```{r Plots}
+library(ggplot2)
+
+ggplot(
+  epidemic_summary,
+  aes(
+    x = prop_modern,
+    y = peak_prevalence,
+    color = Clark_Evans_R
+  )
+) +
+  geom_point(size = 2.5, alpha = 0.8) +
+  scale_color_viridis_c() +
+  labs(
+    title = "Peak epidemic prevalence across landscapes",
+    x = "Proportion modern",
+    y = "Peak prevalence",
+    color = "Clark-Evans R"
+  ) +
+  theme_minimal()
+
+ggplot(
+  epidemic_summary,
+  aes(
+    x = prop_modern,
+    y = time_to_peak,
+    color = Clark_Evans_R
+  )
+) +
+  geom_point(size = 2.5, alpha = 0.8) +
+  scale_color_viridis_c() +
+  labs(
+    title = "Time to peak infection",
+    x = "Proportion modern",
+    y = "Days until peak",
+    color = "Clark-Evans R"
+  ) +
+  theme_minimal()
+
+
+
+ggplot(
+  epidemic_summary,
+  aes(
+    x = prop_modern,
+    y = Clark_Evans_R,
+    color = infected_bat_days
+  )
+) +
+  geom_point(size = 2.5, alpha = 0.8) +
+  scale_color_viridis_c() +
+  theme_minimal()
+
+```
+
+```{r Movement plots}
+design <- landscape_set$design
+
+selected_design <- design %>%
+  filter(prop_modern %in% c(0, 0.5, 1)) %>%
+  filter(landscape_id == unique(design$landscape_id)[2])
+
+landscape_df <- selected_design %>%
+  select(prop_modern, roost_info) %>%
+  tidyr::unnest(roost_info)
+
+ggplot(
+  landscape_df,
+  aes(x = x, y = y, color = roost_type)
+) +
+  geom_point(size = 3.5) +
+  facet_wrap(
+    ~ prop_modern,
+    nrow = 1,
+    labeller = label_both
+  ) +
+  scale_color_manual(
+    values = c(
+      traditional = "#D69E36",
+      modern = "#2878B5"
+    )
+  ) +
+  coord_equal() +
+  labs(
+    title = "Landscape configurations",
+    subtitle = "Effect of building modernization on roost composition",
+    x = "X coordinate",
+    y = "Y coordinate",
+    color = "Building type"
+  )
+
+extract_roost_occupancy <- function(simulation) {
+
+  bind_rows(
+    lapply(seq_along(simulation$roost_history), function(day) {
+
+      roosts <- simulation$roost_history[[day]]
+
+      roosts %>%
+        transmute(
+          day = day - 1,
+          roost_id,
+          N,
+          N_max,
+          roost_type
+        )
+    })
+  )
+}
+
+selected_results <- simulation_results[
+  vapply(
+    simulation_results,
+    function(x) x$landscape_info$landscape_id ==
+      unique(selected_design$landscape_id)[1] &&
+      x$landscape_info$prop_modern %in% c(0, 0.5, 1),
+    logical(1)
+  )
+]
+
+occupancy_df <- bind_rows(
+  lapply(selected_results, function(sim) {
+
+    extract_roost_occupancy(sim) %>%
+      mutate(
+        prop_modern = sim$landscape_info$prop_modern
+      )
+  })
+)
+
+ggplot(
+  occupancy_df,
+  aes(
+    x = day,
+    y = N,
+    group = roost_id,
+    color = roost_type
+  )
+) +
+  geom_line(alpha = 0.7, linewidth = 0.5) +
+  facet_wrap(
+    ~ prop_modern,
+    nrow = 1,
+    labeller = label_both
+  ) +
+  scale_color_manual(
+    values = c(
+      traditional = "#D69E36",
+      modern = "#2878B5"
+    )
+  ) + 
+  labs(
+    title = "Roost occupancy throughout the simulation",
+    x = "Simulation day",
+    y = "Number of bats",
+    color = "Building type"
+  )
+```
