@@ -11,119 +11,50 @@ R_breaks <- seq(
 
 R_breaks
 
-generate_uniform_R_landscapes <- function(
-    n_per_bin,
-    R_breaks,
-    num_roosts,
-    prop_modern = 0.5,
-    num_clusters_values,
-    sd_values,
-    max_attempts = 10000
-) {
-  
-  n_bins <- length(R_breaks) - 1
-  
-  accepted <- vector("list", n_bins)
-  counts <- integer(n_bins)
-  
-  for (b in seq_len(n_bins)) {
-    accepted[[b]] <- list()
-  }
-  
-  for (attempt in seq_len(max_attempts)) {
-    
-    if (all(counts >= n_per_bin)) {
-      break
-    }
-    
-    # Generate a candidate landscape
-    nc <- sample(num_clusters_values, 1)
-    cluster_sd <- sample(sd_values, 1)
-    
-    roost_info <- create_roosts(
-      num_roosts = num_roosts,
-      num_clusters = nc,
-      sd = cluster_sd,
-      prop_modern = prop_modern
-    )
-    
-    R_value <- calculate_clark_evans_R(
-      roost_info$x,
-      roost_info$y
-    )
-    
-    # Identify the target interval
-    bin <- findInterval(
-      R_value,
-      R_breaks,
-      rightmost.closed = TRUE
-    )
-    
-    if (bin < 1 || bin > n_bins) {
-      next
-    }
-    
-    # Keep this landscape if its bin still needs samples
-    if (counts[bin] < n_per_bin) {
-      
-      counts[bin] <- counts[bin] + 1
-      
-      accepted[[bin]][[counts[bin]]] <- list(
-        roost_info = roost_info,
-        Clark_Evans_R = R_value,
-        num_clusters = nc,
-        sd = cluster_sd
-      )
-    }
-  }
-  
-  if (any(counts < n_per_bin)) {
-    warning(
-      "Some bins were not filled. Counts: ",
-      paste(counts, collapse = ", "),
-      ". Consider expanding the candidate parameter ranges."
-    )
-  }
-  
-  list(
-    landscapes = accepted,
-    counts = counts,
-    R_breaks = R_breaks
-  )
-}
-
-landscape_set <- generate_uniform_R_landscapes(
+landscape_set <- generate_landscapes(
   n_per_bin = 10,
   R_breaks = R_breaks,
+  prop_modern_values = seq(0, 1, by = 0.2),
   num_roosts = 100,
-  num_clusters_values = spatial_distribution$num_clusters,
-  sd_values = spatial_distribution$sd
+  cluster_values = cluster_seq,
+  sd_values = sd_seq,
+  modern_N_max = 100,
+  traditional_N_max = 20
 )
 
-R_values <- unlist(
-  lapply(
-    landscape_set$landscapes,
-    function(bin) {
-      vapply(
-        bin,
-        function(x) x$Clark_Evans_R,
-        numeric(1)
-      )
-    }
+simulation_grid <- landscape_set$design
+
+nrow(simulation_grid)
+# Expected: 450
+
+design <- landscape_set$design
+
+r25 <- design$roost_info[[
+  which(
+    design$landscape_index == 1 &
+      design$prop_modern == 0.2
   )
-)
+]]
 
-hist(
-  R_values,
-  breaks = R_breaks,
-  main = "Realized Clark-Evans R distribution",
-  xlab = "Clark-Evans R"
-)
-
-table(
-  cut(
-    R_values,
-    breaks = R_breaks,
-    include.lowest = TRUE
+r50 <- design$roost_info[[
+  which(
+    design$landscape_index == 1 &
+      design$prop_modern == 0.4
   )
+]]
+
+# Coordinates remain fixed
+stopifnot(
+  identical(r25$x, r50$x),
+  identical(r25$y, r50$y)
 )
+
+# Any roost that stays the same type retains its capacity
+same_type <- r25$roost_type == r50$roost_type
+
+stopifnot(
+  all(r25$N_max[same_type] == r50$N_max[same_type])
+)
+
+
+

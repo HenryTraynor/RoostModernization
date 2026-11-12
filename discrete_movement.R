@@ -50,7 +50,7 @@ make_movement_matrix <- function(
     roost_info,
     lambda = 5,
     alpha = 1,
-    stay_prob,
+    stay_prob = 0.75,
     epsilon = 0.01
 ) {
   
@@ -61,22 +61,23 @@ make_movement_matrix <- function(
     stay_prob <- rep(stay_prob, n_roosts)
   }
   
-  # Calculate distances between roosts
+  if (length(stay_prob) != n_roosts) {
+    stop("stay_prob must have length 1 or nrow(roost_info).")
+  }
+  
+  # Calculate distances
   coordinates <- as.matrix(roost_info[, c("x", "y")])
   dist_matrix <- as.matrix(stats::dist(coordinates))
   
-  # Convert distances into movement weights
+  # Calculate connectivity
   connectivity_matrix <- exp(-lambda * dist_matrix)
-  
-  # Bats cannot move to their own roost through the movement weights;
-  # staying is handled separately below.
   diag(connectivity_matrix) <- 0
   
-  # Calculate attractiveness of each destination roost
+  # Calculate destination attractiveness
   attractiveness <- (roost_info$N + epsilon)^alpha *
     pmax(1 - roost_info$N / roost_info$N_max, 0)
   
-  # Weight destinations by their attractiveness
+  # Weight destinations
   movement_weights <- sweep(
     connectivity_matrix,
     MARGIN = 2,
@@ -84,24 +85,23 @@ make_movement_matrix <- function(
     FUN = "*"
   )
   
-  movement_matrix <- matrix(
-    0,
-    nrow = n_roosts,
-    ncol = n_roosts
-  )
+  movement_matrix <- matrix(0, n_roosts, n_roosts)
   
   for (i in seq_len(n_roosts)) {
+    
     weights <- movement_weights[i, ]
     total_weight <- sum(weights)
     
     if (total_weight <= 0) {
-      # No available destination: remain at the origin.
-      movement_matrix[i, i] <- 1
-    } else {
-      movement_matrix[i, ] <-
-        (1 - stay_prob) * weights / total_weight
       
-      movement_matrix[i, i] <- stay_prob
+      movement_matrix[i, i] <- 1
+      
+    } else {
+      
+      movement_matrix[i, ] <-
+        (1 - stay_prob[i]) * weights / total_weight
+      
+      movement_matrix[i, i] <- stay_prob[i]
     }
   }
   
@@ -110,7 +110,7 @@ make_movement_matrix <- function(
     destination = seq_len(n_roosts)
   )
   
-  movement_matrix
+  return(movement_matrix)
 }
 
 
